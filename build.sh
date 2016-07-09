@@ -1,1 +1,1 @@
-clang -g main.c -o megagrep
+clang -O2 main.c -o megagrep

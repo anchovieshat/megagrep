@@ -3,44 +3,160 @@
 #include <string.h>
 #include <pthread.h>
 
-#include "ring.h"
+typedef unsigned long u64;
+typedef unsigned int u32;
+typedef unsigned char u8;
 
-typedef struct ThreadWorker {
-	pthread_t thread;
-} ThreadWorker;
+typedef struct WorkPacket {
+	char *line;
+	char *search_str;
+	u64 count;
+	u64 line_no;
+} WorkPacket;
 
-void *check_line(RingBuffer *ring) {
-	pthread_cond_wait(&ring->new_data, &ring->mtx);
 
-	GrepPass *g = get_entry(ring);
-	if (g == NULL) {
-		puts("[NOPE]");
-		pthread_mutex_unlock(&ring->mtx);
-		pthread_exit(NULL);
-	}
+typedef struct ThreadReturn {
+	u64 count;
+} ThreadReturn;
 
-	if (g->line != NULL) {
-		unsigned long occurances = 0;
-		char *fragment;
+typedef struct Task {
+	void *(*task)(void *);
+	void *args;
+	struct Task *next;
+} Task;
 
-		fragment = strstr(g->line, g->search_str);
-		if (fragment != NULL) {
-			printf("[processed] %s", g->line);
-			fragment = strtok(g->line, g->search_str);
-			while (fragment != NULL) {
-				fragment = strtok(NULL, g->search_str);
-				occurances++;
-			}
+typedef struct ThreadPool {
+	Task *front;
+	Task *rear;
+	pthread_t *threads;
+	pthread_cond_t empty;
+	pthread_cond_t not_empty;
+	pthread_mutex_t lock;
+	u32 count;
+	u32 num_threads;
+	u8 done;
+} ThreadPool;
+
+void *grab_task(ThreadPool *pool) {
+	u32 count = 0;
+	for (;;) {
+		//puts("[GRAB] LOCK TO CHECK COUNT/DONE");
+		pthread_mutex_lock(&pool->lock);
+		while (pool->count == 0 && !pool->done) {
+			//puts("[GRAB] WAITING FOR NOT EMPTY");
+			pthread_cond_wait(&pool->not_empty, &pool->lock);
 		}
 
-		g->ret = occurances;
-		pthread_mutex_unlock(&ring->mtx);
-		pthread_exit(NULL);
-	} else {
-		g->ret = 0;
-		pthread_mutex_unlock(&ring->mtx);
-		pthread_exit(NULL);
+		//puts("[GRAB] GOT NOT EMPTY AND LOCK");
+		if (pool->done && pool->count == 0) {
+			break;
+		}
+
+		Task *tmp;
+		if (pool->count > 0) {
+			tmp = pool->front;
+			pool->front = pool->front->next;
+			pool->count--;
+			pthread_mutex_unlock(&pool->lock);
+			//puts("[GRAB] GOT WORK, RELEASED LOCK");
+		} else {
+			//puts("[GRAB] EMPTY QUEUE");
+			pthread_mutex_unlock(&pool->lock);
+			//puts("[GRAB] RELEASED LOCK, EXITING");
+
+			ThreadReturn *r = malloc(sizeof(ThreadReturn));
+			r->count = count;
+			pthread_exit(r);
+		}
+
+		//puts("[GRAB] RUNNING WORK");
+		tmp->task(tmp->args);
+		count += ((WorkPacket *)tmp->args)->count;
 	}
+
+	pthread_mutex_unlock(&pool->lock);
+	//puts("[GRAB] RELEASED LOCK, EXITING");
+	ThreadReturn *r = malloc(sizeof(ThreadReturn));
+	r->count = count;
+	pthread_exit(r);
+}
+
+ThreadPool *new_threadpool(u32 num_of_threads) {
+	ThreadPool *pool = malloc(sizeof(ThreadPool));
+	pthread_cond_init(&pool->empty, NULL);
+	pthread_cond_init(&pool->not_empty, NULL);
+	pthread_mutex_init(&pool->lock, NULL);
+	pool->front = NULL;
+	pool->rear = NULL;
+	pool->count = 0;
+	pool->done = 0;
+	pool->threads = malloc(sizeof(pthread_t) * num_of_threads);
+	pool->num_threads = num_of_threads;
+
+	for (u32 i = 0; i < num_of_threads; i++) {
+		pthread_create(&pool->threads[i], NULL, (void *)grab_task, pool);
+	}
+
+	return pool;
+}
+
+void check_line(WorkPacket *p) {
+	u64 occurances = 0;
+	char *tmp = p->line;
+
+ 	while ((tmp = strstr(tmp, p->search_str)) != NULL) {
+		occurances++;
+		tmp += strlen(p->search_str);
+	}
+
+	if (occurances > 0) {
+		printf("[%lu](%lu) %s", p->line_no, occurances, p->line);
+	}
+
+	free(p->line);
+	p->count = occurances;
+}
+
+void add_task(ThreadPool *pool, void *(*task)(void *), void *args) {
+	//puts("[ADD] GETTING LOCK");
+	pthread_mutex_lock(&pool->lock);
+	//puts("[ADD] GOT LOCK");
+    Task *tmp = malloc(sizeof(Task));
+	tmp->args = args;
+	tmp->task = task;
+
+	if (pool->count == 0) {
+		pool->front = tmp;
+		pool->rear = tmp;
+		pool->count += 1;
+	} else {
+		pool->rear->next = tmp;
+		pool->rear = tmp;
+		pool->count += 1;
+	}
+
+	//puts("[ADD] RELEASING LOCK");
+	pthread_mutex_unlock(&pool->lock);
+
+	//puts("[ADD] SIGNALING NOT EMPTY");
+	pthread_cond_signal(&pool->not_empty);
+}
+
+u64 finish_work(ThreadPool *pool) {
+	//puts("[DESTROY] BROADCASTING AND JOINING");
+	u32 hitcount = 0;
+	pthread_mutex_lock(&pool->lock);
+	pool->done = 1;
+    for (u32 i = 0; i < pool->num_threads; i++) {
+		pthread_mutex_unlock(&pool->lock);
+		pthread_cond_broadcast(&pool->not_empty);
+		ThreadReturn *r = NULL;
+		pthread_join(pool->threads[i], (void *)&r);
+		hitcount += r->count;
+		free(r);
+	}
+
+	return hitcount;
 }
 
 int main(int argc, char *argv[]) {
@@ -51,58 +167,27 @@ int main(int argc, char *argv[]) {
 
 	FILE *fp = fopen(argv[1], "r");
 	char *line = malloc(256);
-	unsigned long accumulated_occurances = 0;
 
-	ThreadWorker *threads = malloc(sizeof(ThreadWorker) * 8);
+	ThreadPool *pool = new_threadpool(8);
 
-	RingBuffer ring;
-	ring.max_entries = 5;
-	ring.head = 0;
-	ring.tail = ring.head;
-	ring.count = 0;
-	ring.buffer = malloc(sizeof(GrepPass *) * ring.max_entries);
-	pthread_mutex_init(&ring.mtx, NULL);
-	pthread_cond_init(&ring.new_data, NULL);
-
-	GPList *list = NULL;
-
-	int thread_idx = 0;
-
-	for (; thread_idx < 8; thread_idx++) {
-		pthread_create(&threads[thread_idx].thread, NULL, (void *)check_line, &ring);
-	}
-
+	u64 line_no = 1;
     char *next_line = fgets(line, 256, fp);
 	while (next_line != NULL) {
-		GrepPass *g = new_gpass(&list, next_line, argv[2]);
-		add_entry(&ring, g);
+		WorkPacket *p = malloc(sizeof(WorkPacket));
+
+		p->line = malloc(256);
+		memset(p->line, 0, 256);
+		strncpy(p->line, next_line, strlen(next_line));
+
+		p->line_no = line_no;
+		p->search_str = argv[2];
+		p->count = 0;
+
+		add_task(pool, (void *)check_line, p);
     	next_line = fgets(line, 256, fp);
-	}
-	pthread_cond_broadcast(&ring.new_data);
-
-
-	puts("[JOINING]");
-	for (int i = 0; i < thread_idx; i++) {
-		pthread_join(threads[i].thread, NULL);
+		line_no++;
 	}
 
-	// build hit list, clean up GrepPass objects
-    while (list != NULL) {
-		accumulated_occurances += list->data->ret;
-		GPList *tmp = list->next;
-		free(list->data->line);
-		free(list->data);
-		free(list);
-		list = tmp;
-	}
-
-	printf("occured %lu times\n", accumulated_occurances);
-
-	pthread_mutex_destroy(&ring.mtx);
-	pthread_cond_destroy(&ring.new_data);
-	pthread_exit(NULL);
-	free(ring.buffer);
-	free(threads);
-	free(line);
-	fclose(fp);
+	u64 hitcount = finish_work(pool);
+	printf("%lu\n", hitcount);
 }
