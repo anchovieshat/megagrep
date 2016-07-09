@@ -29,7 +29,6 @@ typedef struct ThreadPool {
 	Task *front;
 	Task *rear;
 	pthread_t *threads;
-	pthread_cond_t empty;
 	pthread_cond_t not_empty;
 	pthread_mutex_t lock;
 	u32 count;
@@ -38,7 +37,7 @@ typedef struct ThreadPool {
 } ThreadPool;
 
 void *grab_task(ThreadPool *pool) {
-	u32 count = 0;
+	u64 count = 0;
 	for (;;) {
 		//puts("[GRAB] LOCK TO CHECK COUNT/DONE");
 		pthread_mutex_lock(&pool->lock);
@@ -72,6 +71,7 @@ void *grab_task(ThreadPool *pool) {
 		//puts("[GRAB] RUNNING WORK");
 		tmp->task(tmp->args);
 		count += ((WorkPacket *)tmp->args)->count;
+		free(tmp);
 	}
 
 	pthread_mutex_unlock(&pool->lock);
@@ -83,7 +83,6 @@ void *grab_task(ThreadPool *pool) {
 
 ThreadPool *new_threadpool(u32 num_of_threads) {
 	ThreadPool *pool = malloc(sizeof(ThreadPool));
-	pthread_cond_init(&pool->empty, NULL);
 	pthread_cond_init(&pool->not_empty, NULL);
 	pthread_mutex_init(&pool->lock, NULL);
 	pool->front = NULL;
@@ -110,7 +109,7 @@ void check_line(WorkPacket *p) {
 	}
 
 	if (occurances > 0) {
-		printf("[%lu](%lu) %s", p->line_no, occurances, p->line);
+		printf("[%lu] %s", p->line_no, p->line);
 	}
 
 	free(p->line);
@@ -144,7 +143,7 @@ void add_task(ThreadPool *pool, void *(*task)(void *), void *args) {
 
 u64 finish_work(ThreadPool *pool) {
 	//puts("[DESTROY] BROADCASTING AND JOINING");
-	u32 hitcount = 0;
+	u64 hitcount = 0;
 	pthread_mutex_lock(&pool->lock);
 	pool->done = 1;
     for (u32 i = 0; i < pool->num_threads; i++) {
@@ -156,6 +155,10 @@ u64 finish_work(ThreadPool *pool) {
 		free(r);
 	}
 
+	free(pool->threads);
+	pthread_mutex_destroy(&pool->lock);
+	pthread_cond_destroy(&pool->not_empty);
+
 	return hitcount;
 }
 
@@ -165,22 +168,23 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	FILE *fp = fopen(argv[1], "r");
+	FILE *fp = fopen(argv[2], "r");
 	char *line = malloc(256);
 
-	ThreadPool *pool = new_threadpool(8);
+	ThreadPool *pool = new_threadpool(1);
 
 	u64 line_no = 1;
     char *next_line = fgets(line, 256, fp);
 	while (next_line != NULL) {
 		WorkPacket *p = malloc(sizeof(WorkPacket));
 
-		p->line = malloc(256);
-		memset(p->line, 0, 256);
-		strncpy(p->line, next_line, strlen(next_line));
+		u64 sz = strlen(next_line);
+		p->line = malloc(sz+1);
+		strncpy(p->line, next_line, sz);
+		p->line[sz] = '\0';
 
 		p->line_no = line_no;
-		p->search_str = argv[2];
+		p->search_str = argv[1];
 		p->count = 0;
 
 		add_task(pool, (void *)check_line, p);
