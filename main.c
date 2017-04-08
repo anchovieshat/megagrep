@@ -3,14 +3,22 @@
 #include <string.h>
 #include <stdint.h>
 #include <pthread.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <fcntl.h>
 
 #include "common.h"
 
+typedef struct Chunk {
+	u8 *data;
+	u64 size;
+	u64 cur_pos;
+	u64 idx;
+} Chunk;
+
 typedef struct WorkPacket {
-	char *line;
+	Chunk *chunk;
 	char *search_str;
 	u64 count;
 	u64 line_no;
@@ -32,7 +40,7 @@ typedef struct ThreadPool {
 	pthread_t *threads;
 	pthread_cond_t not_empty;
 	pthread_mutex_t lock;
-	u32 count;
+	u64 count;
 	u32 num_threads;
 	u8 done;
 } ThreadPool;
@@ -92,21 +100,80 @@ ThreadPool *new_threadpool(u32 num_of_threads) {
 	return pool;
 }
 
-void check_line(WorkPacket *p) {
-	u64 occurances = 0;
-	char *tmp = p->line;
+typedef struct LineRef {
+	char *str;
+	u64 len;
+} LineRef;
 
- 	while ((tmp = strstr(tmp, p->search_str)) != NULL) {
+LineRef *new_lineref(char *str, u64 len) {
+	LineRef *line_ref = (LineRef *)malloc(sizeof(LineRef));
+	line_ref->str = str;
+	line_ref->len = len;
+	return line_ref;
+}
+
+LineRef *get_line(Chunk *chunk, u64 max_run) {
+	u64 chunk_idx = chunk->idx + 1;
+	if (chunk->data[chunk->cur_pos] == 0 || (i8)(chunk->data[chunk->cur_pos]) == EOF || chunk->cur_pos > chunk->size * chunk_idx) {
+		return NULL;
+	}
+
+	u64 line_idx = 0;
+	for (u64 i = chunk->cur_pos; i < chunk->cur_pos + (max_run - 1); i++) {
+		char c = chunk->data[i];
+		if (c != '\n' && c != EOF) {
+			line_idx++;
+		} else {
+            if (c == '\n') {
+				line_idx++;
+			}
+
+			LineRef *lr = new_lineref((char *)(chunk->data + chunk->cur_pos), line_idx);
+			chunk->cur_pos += line_idx;
+			return lr;
+		}
+	}
+
+	LineRef *lr = new_lineref((char *)(chunk->data + chunk->cur_pos), line_idx);
+	chunk->cur_pos += line_idx;
+	return lr;
+}
+
+u8 char_idx(char c) {
+	if (c >= 'A') {
+		return c - 65;
+	} else {
+		return c - 97;
+	}
+}
+
+void check_line(WorkPacket *p, LineRef *line) {
+	u64 occurances = 0;
+	char *tmp = line->str;
+
+	u64 search_len = strlen(p->search_str);
+ 	while ((tmp = strnstr(tmp, p->search_str, line->len)) != NULL) {
 		occurances++;
-		tmp += strlen(p->search_str);
+		tmp += search_len;
 	}
 
 	if (occurances > 0) {
-		printf("[%llu] %s", p->line_no, p->line);
+		printf("[%llu] %.*s", occurances, (i32)line->len, line->str);
+		p->line_no++;
 	}
 
-	free(p->line);
-	p->count = occurances;
+	free(line);
+}
+
+void process_chunk(WorkPacket *p) {
+	u64 line_no = 1;
+
+    LineRef *next_line = get_line(p->chunk, 256);
+	while (next_line != NULL) {
+		check_line(p, next_line);
+    	next_line = get_line(p->chunk, 256);
+		line_no++;
+	}
 }
 
 void add_task(ThreadPool *pool, void *(*task)(void *), void *args) {
@@ -154,19 +221,17 @@ typedef struct File {
 	u64 size;
 } File;
 
-typedef struct Chunk {
-	u8 *data;
-	u64 size;
-	u64 cur_pos;
-	u64 idx;
-} Chunk;
+
+void print_chunk(Chunk *c) {
+	printf("size: %llu, idx: %llu, cur_pos: %llu, data: %p\n", c->size, c->idx, c->cur_pos, c->data);
+}
 
 Chunk *new_chunk(u64 size, u64 chunk_idx, u8 *data) {
 	Chunk *c = malloc(sizeof(Chunk));
 	c->size = size;
-	c->idx = chunk_idx + 1;
+	c->idx = chunk_idx;
 	c->cur_pos = (chunk_idx * c->size);
-	c->data = c->cur_pos + data;
+	c->data = data;
 	return c;
 }
 
@@ -198,38 +263,6 @@ void close_file(File *f) {
 	free(f);
 }
 
-char *get_line(Chunk *chunk, u64 max_run) {
-	if (chunk->data[chunk->cur_pos] == 0 || (i8)(chunk->data[chunk->cur_pos]) == EOF || chunk->cur_pos > chunk->size * chunk->idx) {
-		printf("%s\n", BOOL_FMT(chunk->cur_pos > chunk->size * chunk->idx));
-		return NULL;
-	}
-
-	char *line = malloc(max_run);
-
-	u64 line_idx = 0;
-	for (u64 i = chunk->cur_pos; i < chunk->cur_pos + (max_run - 1); i++) {
-		char c = chunk->data[i];
-		if (c != '\n' && c != EOF) {
-			line[line_idx] = c;
-			line_idx++;
-		} else {
-            if (c == '\n') {
-				line[line_idx] = '\n';
-				line_idx++;
-			} else if (c == EOF) {
-				printf("EOF");
-			}
-
-			line[line_idx] = 0;
-			chunk->cur_pos += line_idx;
-			return line;
-		}
-	}
-
-	line[line_idx] = 0;
-	chunk->cur_pos += line_idx;
-	return line;
-}
 
 int main(int argc, char *argv[]) {
     if (argc != 3) {
@@ -238,25 +271,32 @@ int main(int argc, char *argv[]) {
 	}
 
 	File *file = open_file(argv[2]);
-	ThreadPool *pool = new_threadpool(8);
-	Chunk **chunks = new_chunks(file, 2);
+	u64 num_chunks = file->size / (getpagesize() * 128);
 
-	u64 line_no = 1;
-    char *next_line = get_line(chunks[0], 256);
-	while (next_line != NULL) {
-		WorkPacket *p = malloc(sizeof(WorkPacket));
-
-		p->line = strdup(next_line);
-		p->line_no = line_no;
-		p->search_str = argv[1];
-		p->count = 0;
-
-		add_task(pool, (void *)check_line, p);
-    	next_line = get_line(chunks[0], 256);
-		line_no++;
+	u64 num_threads;
+	if (num_chunks > 8) {
+		num_threads = num_chunks;
+		num_chunks = 4;
+	} else if (num_chunks == 0) {
+		num_chunks = 1;
+		num_threads = 1;
+	} else {
+		num_threads = 8;
 	}
 
-	u64 hitcount = finish_work(pool);
-	printf("%llu\n", hitcount);
+	ThreadPool *pool = new_threadpool(num_threads);
+	Chunk **chunks = new_chunks(file, num_chunks);
+
+	for (u64 i = 0; i < num_chunks; i++) {
+		WorkPacket *p = malloc(sizeof(WorkPacket));
+        p->chunk = chunks[i];
+		p->search_str = argv[1];
+		p->count = 0;
+		add_task(pool, (void *)process_chunk, p);
+	}
+
+	finish_work(pool);
 	close_file(file);
+
+	printf("number of chunks: %llu\n", num_chunks);
 }
