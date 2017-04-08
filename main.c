@@ -1,11 +1,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <pthread.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <fcntl.h>
 
-typedef unsigned long u64;
-typedef unsigned int u32;
-typedef unsigned char u8;
+#include "common.h"
 
 typedef struct WorkPacket {
 	char *line;
@@ -13,7 +15,6 @@ typedef struct WorkPacket {
 	u64 count;
 	u64 line_no;
 } WorkPacket;
-
 
 typedef struct ThreadReturn {
 	u64 count;
@@ -39,14 +40,11 @@ typedef struct ThreadPool {
 void *grab_task(ThreadPool *pool) {
 	u64 count = 0;
 	for (;;) {
-		//puts("[GRAB] LOCK TO CHECK COUNT/DONE");
-		pthread_mutex_lock(&pool->lock);
+		get_lock(&pool->lock);
 		while (pool->count == 0 && !pool->done) {
-			//puts("[GRAB] WAITING FOR NOT EMPTY");
-			pthread_cond_wait(&pool->not_empty, &pool->lock);
+			wait_for_lock(&pool->not_empty, &pool->lock);
 		}
 
-		//puts("[GRAB] GOT NOT EMPTY AND LOCK");
 		if (pool->done && pool->count == 0) {
 			break;
 		}
@@ -56,26 +54,21 @@ void *grab_task(ThreadPool *pool) {
 			tmp = pool->front;
 			pool->front = pool->front->next;
 			pool->count--;
-			pthread_mutex_unlock(&pool->lock);
-			//puts("[GRAB] GOT WORK, RELEASED LOCK");
+			release_lock(&pool->lock);
 		} else {
-			//puts("[GRAB] EMPTY QUEUE");
-			pthread_mutex_unlock(&pool->lock);
-			//puts("[GRAB] RELEASED LOCK, EXITING");
+			release_lock(&pool->lock);
 
 			ThreadReturn *r = malloc(sizeof(ThreadReturn));
 			r->count = count;
 			pthread_exit(r);
 		}
 
-		//puts("[GRAB] RUNNING WORK");
 		tmp->task(tmp->args);
 		count += ((WorkPacket *)tmp->args)->count;
 		free(tmp);
 	}
 
-	pthread_mutex_unlock(&pool->lock);
-	//puts("[GRAB] RELEASED LOCK, EXITING");
+	release_lock(&pool->lock);
 	ThreadReturn *r = malloc(sizeof(ThreadReturn));
 	r->count = count;
 	pthread_exit(r);
@@ -109,7 +102,7 @@ void check_line(WorkPacket *p) {
 	}
 
 	if (occurances > 0) {
-		printf("[%lu] %s", p->line_no, p->line);
+		printf("[%llu] %s", p->line_no, p->line);
 	}
 
 	free(p->line);
@@ -117,9 +110,7 @@ void check_line(WorkPacket *p) {
 }
 
 void add_task(ThreadPool *pool, void *(*task)(void *), void *args) {
-	//puts("[ADD] GETTING LOCK");
-	pthread_mutex_lock(&pool->lock);
-	//puts("[ADD] GOT LOCK");
+	get_lock(&pool->lock);
     Task *tmp = malloc(sizeof(Task));
 	tmp->args = args;
 	tmp->task = task;
@@ -134,21 +125,17 @@ void add_task(ThreadPool *pool, void *(*task)(void *), void *args) {
 		pool->count += 1;
 	}
 
-	//puts("[ADD] RELEASING LOCK");
-	pthread_mutex_unlock(&pool->lock);
-
-	//puts("[ADD] SIGNALING NOT EMPTY");
-	pthread_cond_signal(&pool->not_empty);
+	release_lock(&pool->lock);
+	signal_to_locks(&pool->not_empty);
 }
 
 u64 finish_work(ThreadPool *pool) {
-	//puts("[DESTROY] BROADCASTING AND JOINING");
 	u64 hitcount = 0;
-	pthread_mutex_lock(&pool->lock);
+	get_lock(&pool->lock);
 	pool->done = 1;
     for (u32 i = 0; i < pool->num_threads; i++) {
-		pthread_mutex_unlock(&pool->lock);
-		pthread_cond_broadcast(&pool->not_empty);
+		release_lock(&pool->lock);
+		broadcast_to_locks(&pool->not_empty);
 		ThreadReturn *r = NULL;
 		pthread_join(pool->threads[i], (void *)&r);
 		hitcount += r->count;
@@ -162,36 +149,114 @@ u64 finish_work(ThreadPool *pool) {
 	return hitcount;
 }
 
+typedef struct File {
+	u8 *data;
+	u64 size;
+} File;
+
+typedef struct Chunk {
+	u8 *data;
+	u64 size;
+	u64 cur_pos;
+	u64 idx;
+} Chunk;
+
+Chunk *new_chunk(u64 size, u64 chunk_idx, u8 *data) {
+	Chunk *c = malloc(sizeof(Chunk));
+	c->size = size;
+	c->idx = chunk_idx + 1;
+	c->cur_pos = (chunk_idx * c->size);
+	c->data = c->cur_pos + data;
+	return c;
+}
+
+Chunk **new_chunks(File *f, u64 num_chunks) {
+	Chunk **chunks = (Chunk **)malloc(sizeof(Chunk *) * num_chunks);
+
+	for (u64 i = 0; i < num_chunks; i++) {
+		chunks[i] = new_chunk(f->size / num_chunks, i, f->data);
+	}
+
+	return chunks;
+}
+
+File *open_file(char *filename) {
+	File *f = (File *)malloc(sizeof(File));
+	struct stat file_state;
+
+	i32 fd = open(filename, O_RDONLY);
+	fstat(fd, &file_state);
+
+	u8 *data = mmap(0, file_state.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    f->data = data;
+	f->size = file_state.st_size;
+	return f;
+}
+
+void close_file(File *f) {
+	munmap(f->data, f->size);
+	free(f);
+}
+
+char *get_line(Chunk *chunk, u64 max_run) {
+	if (chunk->data[chunk->cur_pos] == 0 || (i8)(chunk->data[chunk->cur_pos]) == EOF || chunk->cur_pos > chunk->size * chunk->idx) {
+		printf("%s\n", BOOL_FMT(chunk->cur_pos > chunk->size * chunk->idx));
+		return NULL;
+	}
+
+	char *line = malloc(max_run);
+
+	u64 line_idx = 0;
+	for (u64 i = chunk->cur_pos; i < chunk->cur_pos + (max_run - 1); i++) {
+		char c = chunk->data[i];
+		if (c != '\n' && c != EOF) {
+			line[line_idx] = c;
+			line_idx++;
+		} else {
+            if (c == '\n') {
+				line[line_idx] = '\n';
+				line_idx++;
+			} else if (c == EOF) {
+				printf("EOF");
+			}
+
+			line[line_idx] = 0;
+			chunk->cur_pos += line_idx;
+			return line;
+		}
+	}
+
+	line[line_idx] = 0;
+	chunk->cur_pos += line_idx;
+	return line;
+}
+
 int main(int argc, char *argv[]) {
     if (argc != 3) {
-		puts("not enough arguments!");
+		puts("incorrect number of arguments! Try ./megagrep search_term file");
 		return 1;
 	}
 
-	FILE *fp = fopen(argv[2], "r");
-	char *line = malloc(256);
-
-	ThreadPool *pool = new_threadpool(1);
+	File *file = open_file(argv[2]);
+	ThreadPool *pool = new_threadpool(8);
+	Chunk **chunks = new_chunks(file, 2);
 
 	u64 line_no = 1;
-    char *next_line = fgets(line, 256, fp);
+    char *next_line = get_line(chunks[0], 256);
 	while (next_line != NULL) {
 		WorkPacket *p = malloc(sizeof(WorkPacket));
 
-		u64 sz = strlen(next_line);
-		p->line = malloc(sz+1);
-		strncpy(p->line, next_line, sz);
-		p->line[sz] = '\0';
-
+		p->line = strdup(next_line);
 		p->line_no = line_no;
 		p->search_str = argv[1];
 		p->count = 0;
 
 		add_task(pool, (void *)check_line, p);
-    	next_line = fgets(line, 256, fp);
+    	next_line = get_line(chunks[0], 256);
 		line_no++;
 	}
 
 	u64 hitcount = finish_work(pool);
-	printf("%lu\n", hitcount);
+	printf("%llu\n", hitcount);
+	close_file(file);
 }

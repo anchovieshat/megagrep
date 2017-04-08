@@ -1,4 +1,5 @@
 *.swp
 *.txt
 *.dSYM
+.DS_Store
 megagrep
