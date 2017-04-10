@@ -32,4 +32,16 @@ typedef u32 bool;
 #define signal_to_locks(cond) debug("%s:%s:%d signaling: %s\n", __FILE__, __func__, __LINE__, #cond); pthread_cond_signal((cond)); debug("%s:%s:%d sent signal: %s\n", __FILE__, __func__, __LINE__, #cond);
 #define broadcast_to_locks(cond) debug("%s:%s:%d signaling: %s\n", __FILE__, __func__, __LINE__, #cond); pthread_cond_broadcast((cond)); debug("%s:%s:%d broadcasted signal: %s\n", __FILE__, __func__, __LINE__, #cond);
 
+uint64_t rdtsc() {
+    uint32_t lo, hi;
+    __asm__ __volatile__ (
+      "xorl %%eax, %%eax\n"
+      "cpuid\n"
+      "rdtsc\n"
+      : "=a" (lo), "=d" (hi)
+      :
+      : "%ebx", "%ecx");
+    return (uint64_t)hi << 32 | lo;
+}
+
 #endif
