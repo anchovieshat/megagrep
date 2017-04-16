@@ -211,13 +211,11 @@ u64 *build_lookup(char *needle, u64 needle_len) {
 	return lookup;
 }
 
-#define NEW_GREP
 void check_line(WorkPacket *p, LineRef *line) {
 	char *tmp = line->str;
 
 	u64 occurances = 0;
 	i64 tmp_len = line->len;
-#ifdef NEW_GREP
 	u64 occ_idx = 0;
     while ((occ_idx = bm_strstr((u8 *)tmp, line->len, p->search_str, p->search_str_len, p->lookup)) != line->len) {
 		tmp += occ_idx + p->search_str_len;
@@ -227,18 +225,7 @@ void check_line(WorkPacket *p, LineRef *line) {
 		}
 		occurances++;
 	}
-#else
- 	while (tmp != NULL) {
-		tmp = strnstr(tmp, p->search_str, line->len);
-		if (tmp != NULL) {
-			tmp += p->search_str_len + 1;
-			tmp_len = tmp_len - p->search_str_len - 1;
-			printf("[%.*s]\n", (i32)tmp_len, tmp);
-			printf("line end: %p, partial end: %p\n", line->str + line->len, tmp + tmp_len);
-			occurances++;
-		}
-	}
-#endif
+
 	if (occurances > 0) {
 		printf("%.*s", (i32)line->len, line->str);
 	}
@@ -307,14 +294,29 @@ void print_chunk(Chunk *c) {
 	printf("size: %llu, idx: %llu, cur_pos: %llu, data: %p\n", c->size, c->idx, c->cur_pos, c->data);
 }
 
+u64 find_prev_newline(u8 *data, u64 pos) {
+	u64 tmp_pos = pos;
+	while (tmp_pos != 0 && data[tmp_pos] != '\n') {
+		tmp_pos--;
+	}
+
+	return tmp_pos;
+}
+
 Chunk *new_chunk(u64 size, u64 chunk_idx, u8 *data) {
 	Chunk *c = malloc(sizeof(Chunk));
 	c->size = size;
 	c->idx = chunk_idx;
 	c->cur_pos = (chunk_idx * c->size);
 	c->data = data;
+
+	u64 real_pos = find_prev_newline(c->data, c->cur_pos);
+	c->size -= c->cur_pos - real_pos;
+	c->cur_pos = real_pos;
+
 	return c;
 }
+
 
 Chunk **new_chunks(File *f, u64 num_chunks) {
 	Chunk **chunks = (Chunk **)malloc(sizeof(Chunk *) * num_chunks);
@@ -352,8 +354,8 @@ int main(int argc, char *argv[]) {
 	}
 
 	File *file = open_file(argv[2]);
-	u64 num_chunks = 16;
-	u64 num_threads = 8;
+	u64 num_chunks = 15;
+	u64 num_threads = 1;
 
 	ThreadPool *pool = new_threadpool(num_threads);
 	Chunk **chunks = new_chunks(file, num_chunks);
