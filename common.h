@@ -2,7 +2,10 @@
 #define COMMON_H
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
+#include <stdbool.h>
 
 typedef uint64_t u64;
 typedef uint32_t u32;
@@ -15,9 +18,6 @@ typedef int8_t i8;
 typedef float f32;
 typedef double f64;
 
-typedef u32 bool;
-#define true 1
-#define false 0
 #define BOOL_FMT(x) x ? "true" : "false"
 
 #ifdef DEBUG
@@ -32,8 +32,9 @@ typedef u32 bool;
 #define signal_to_locks(cond) debug("%s:%s:%d signaling: %s\n", __FILE__, __func__, __LINE__, #cond); pthread_cond_signal((cond)); debug("%s:%s:%d sent signal: %s\n", __FILE__, __func__, __LINE__, #cond);
 #define broadcast_to_locks(cond) debug("%s:%s:%d signaling: %s\n", __FILE__, __func__, __LINE__, #cond); pthread_cond_broadcast((cond)); debug("%s:%s:%d broadcasted signal: %s\n", __FILE__, __func__, __LINE__, #cond);
 
-uint64_t rdtsc() {
-    uint32_t lo, hi;
+#if defined (__x86_64__)
+u64 rdtsc() {
+    u32 lo, hi;
     __asm__ __volatile__ (
       "xorl %%eax, %%eax\n"
       "cpuid\n"
@@ -41,7 +42,13 @@ uint64_t rdtsc() {
       : "=a" (lo), "=d" (hi)
       :
       : "%ebx", "%ecx");
-    return (uint64_t)hi << 32 | lo;
+    return (u64)hi << 32 | lo;
 }
+#else
+u64 rdtsc() {
+	puts("This platform may not support this rdtsc!");
+	return -1;
+}
+#endif
 
 #endif

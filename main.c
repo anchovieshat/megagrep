@@ -82,8 +82,6 @@ void *grab_task(ThreadContainer *tc) {
 		}
 
 		tmp->task(tmp->args);
-		//printf("[THREAD %llu] waited for lock for : %llu\n", tc->thread_idx, end_time - start_time);
-		//printf("[THREAD %llu] ran task\n", tc->thread_idx);
 		count += ((WorkPacket *)tmp->args)->count;
 		free(tmp);
 	}
@@ -92,6 +90,7 @@ void *grab_task(ThreadContainer *tc) {
 	ThreadReturn *r = malloc(sizeof(ThreadReturn));
 	r->count = count;
 
+	free(tc);
 	pthread_exit(r);
 }
 
@@ -155,6 +154,25 @@ LineRef *get_line(Chunk *chunk, u64 max_run) {
 	return lr;
 }
 
+char *ref_strnstr(const char *s, const char *find, size_t slen) {
+	char c, sc;
+	size_t len;
+
+	if ((c = *find++) != '\0') {
+		len = strlen(find);
+		do {
+			do {
+				if (slen-- < 1 || (sc = *s++) == '\0')
+					return (NULL);
+			} while (sc != c);
+			if (len > slen)
+				return (NULL);
+		} while (strncmp(s, find, len) != 0);
+		s--;
+	}
+	return ((char *)s);
+}
+
 u64 bm_strstr(u8 *str, u64 str_len, char *needle, u64 needle_len, u64 *lookup) {
 	if (needle_len > str_len) return str_len;
 	if (needle_len == 1) {
@@ -178,7 +196,11 @@ u64 bm_strstr(u8 *str, u64 str_len, char *needle, u64 needle_len, u64 *lookup) {
 
 u64 *build_lookup(char *needle, u64 needle_len) {
 	u64 *lookup = (u64 *)malloc(sizeof(u64) * 256);
-	lookup = memset(lookup, needle_len, sizeof(u64) * 256);
+
+	for (u64 i = 0; i < 256; i++) {
+		lookup[i] = needle_len;
+	}
+	//lookup = memset(lookup, needle_len, 256);
 
 	if (needle_len >= 1) {
 		for (u64 i = 0; i < needle_len - 1; ++i) {
@@ -189,42 +211,58 @@ u64 *build_lookup(char *needle, u64 needle_len) {
 	return lookup;
 }
 
+#define NEW_GREP
 void check_line(WorkPacket *p, LineRef *line) {
 	char *tmp = line->str;
 
 	u64 occurances = 0;
-	u64 tmp_len = line->len;
+	i64 tmp_len = line->len;
+#ifdef NEW_GREP
 	u64 occ_idx = 0;
     while ((occ_idx = bm_strstr((u8 *)tmp, line->len, p->search_str, p->search_str_len, p->lookup)) != line->len) {
 		tmp += occ_idx + p->search_str_len;
 		tmp_len -= occ_idx + p->search_str_len;
+		if (tmp_len <= 0) {
+			break;
+		}
 		occurances++;
 	}
+#else
+ 	while (tmp != NULL) {
+		tmp = strnstr(tmp, p->search_str, line->len);
+		if (tmp != NULL) {
+			tmp += p->search_str_len + 1;
+			tmp_len = tmp_len - p->search_str_len - 1;
+			printf("[%.*s]\n", (i32)tmp_len, tmp);
+			printf("line end: %p, partial end: %p\n", line->str + line->len, tmp + tmp_len);
+			occurances++;
+		}
+	}
+#endif
 	if (occurances > 0) {
-		//printf("[%llu] %.*s", occurances, (i32)line->len, line->str);
-		p->line_no++;
+		printf("%.*s", (i32)line->len, line->str);
 	}
 
+	p->line_no++;
 	free(line);
 }
 
 void process_chunk(WorkPacket *p) {
-	u64 line_no = 1;
+	p->line_no = 1;
 
     LineRef *next_line = get_line(p->chunk, 256);
 	while (next_line != NULL) {
 		check_line(p, next_line);
     	next_line = get_line(p->chunk, 256);
-		line_no++;
 	}
 }
 
 void add_task(ThreadPool *pool, void *(*task)(void *), void *args) {
-	get_lock(&pool->lock);
     Task *tmp = malloc(sizeof(Task));
 	tmp->args = args;
 	tmp->task = task;
 
+	get_lock(&pool->lock);
 	if (pool->count == 0) {
 		pool->front = tmp;
 		pool->rear = tmp;
@@ -320,7 +358,6 @@ int main(int argc, char *argv[]) {
 	ThreadPool *pool = new_threadpool(num_threads);
 	Chunk **chunks = new_chunks(file, num_chunks);
 
-	u64 start_time = rdtsc();
 	for (u64 i = 0; i < num_chunks; i++) {
 		WorkPacket *p = malloc(sizeof(WorkPacket));
         p->chunk = chunks[i];
@@ -332,10 +369,6 @@ int main(int argc, char *argv[]) {
 	}
 
 	finish_work(pool);
-	u64 end_time = rdtsc();
-	printf("tasks took %llu to run\n", end_time - start_time);
 
 	close_file(file);
-
-	printf("number of chunks: %llu\n", num_chunks);
 }
