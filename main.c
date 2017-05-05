@@ -154,25 +154,6 @@ LineRef *get_line(Chunk *chunk, u64 max_run) {
 	return lr;
 }
 
-char *ref_strnstr(const char *s, const char *find, size_t slen) {
-	char c, sc;
-	size_t len;
-
-	if ((c = *find++) != '\0') {
-		len = strlen(find);
-		do {
-			do {
-				if (slen-- < 1 || (sc = *s++) == '\0')
-					return (NULL);
-			} while (sc != c);
-			if (len > slen)
-				return (NULL);
-		} while (strncmp(s, find, len) != 0);
-		s--;
-	}
-	return ((char *)s);
-}
-
 u64 bm_strstr(u8 *str, u64 str_len, char *needle, u64 needle_len, u64 *lookup) {
 	if (needle_len > str_len) return str_len;
 	if (needle_len == 1) {
@@ -200,7 +181,6 @@ u64 *build_lookup(char *needle, u64 needle_len) {
 	for (u64 i = 0; i < 256; i++) {
 		lookup[i] = needle_len;
 	}
-	//lookup = memset(lookup, needle_len, 256);
 
 	if (needle_len >= 1) {
 		for (u64 i = 0; i < needle_len - 1; ++i) {
@@ -289,7 +269,6 @@ typedef struct File {
 	u64 size;
 } File;
 
-
 void print_chunk(Chunk *c) {
 	printf("size: %llu, idx: %llu, cur_pos: %llu, data: %p\n", c->size, c->idx, c->cur_pos, c->data);
 }
@@ -317,7 +296,6 @@ Chunk *new_chunk(u64 size, u64 chunk_idx, u8 *data) {
 	return c;
 }
 
-
 Chunk **new_chunks(File *f, u64 num_chunks) {
 	Chunk **chunks = (Chunk **)malloc(sizeof(Chunk *) * num_chunks);
 
@@ -333,6 +311,12 @@ File *open_file(char *filename) {
 	struct stat file_state;
 
 	i32 fd = open(filename, O_RDONLY);
+
+	if (fd == -1) {
+		printf("Couldn't open %s!\n", filename);
+		return NULL;
+	}
+
 	fstat(fd, &file_state);
 
 	u8 *data = mmap(0, file_state.st_size, PROT_READ, MAP_SHARED, fd, 0);
@@ -354,8 +338,13 @@ int main(int argc, char *argv[]) {
 	}
 
 	File *file = open_file(argv[2]);
-	u64 num_chunks = 15;
-	u64 num_threads = 1;
+
+	if (file == NULL) {
+		return 1;
+	}
+
+	u64 num_chunks = 8;
+	u64 num_threads = 8;
 
 	ThreadPool *pool = new_threadpool(num_threads);
 	Chunk **chunks = new_chunks(file, num_chunks);
