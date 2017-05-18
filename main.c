@@ -120,17 +120,17 @@ typedef struct LineRef {
 	u64 len;
 } LineRef;
 
-LineRef *new_lineref(char *str, u64 len) {
-	LineRef *line_ref = (LineRef *)malloc(sizeof(LineRef));
-	line_ref->str = str;
-	line_ref->len = len;
+LineRef new_lineref(char *str, u64 len) {
+	LineRef line_ref;
+	line_ref.str = str;
+	line_ref.len = len;
 	return line_ref;
 }
 
-LineRef *get_line(Chunk *chunk, u64 max_run) {
+LineRef get_line(Chunk *chunk, u64 max_run) {
 	u64 chunk_idx = chunk->idx + 1;
 	if (chunk->data[chunk->cur_pos] == 0 || (i8)(chunk->data[chunk->cur_pos]) == EOF || chunk->cur_pos > chunk->size * chunk_idx) {
-		return NULL;
+		return new_lineref(NULL, 0);
 	}
 
 	u64 line_idx = 0;
@@ -143,13 +143,13 @@ LineRef *get_line(Chunk *chunk, u64 max_run) {
 				line_idx++;
 			}
 
-			LineRef *lr = new_lineref((char *)(chunk->data + chunk->cur_pos), line_idx);
+			LineRef lr = new_lineref((char *)(chunk->data + chunk->cur_pos), line_idx);
 			chunk->cur_pos += line_idx;
 			return lr;
 		}
 	}
 
-	LineRef *lr = new_lineref((char *)(chunk->data + chunk->cur_pos), line_idx);
+	LineRef lr = new_lineref((char *)(chunk->data + chunk->cur_pos), line_idx);
 	chunk->cur_pos += line_idx;
 	return lr;
 }
@@ -191,13 +191,13 @@ u64 *build_lookup(char *needle, u64 needle_len) {
 	return lookup;
 }
 
-void check_line(WorkPacket *p, LineRef *line) {
-	char *tmp = line->str;
+void check_line(WorkPacket *p, LineRef line) {
+	char *tmp = line.str;
 
 	u64 occurances = 0;
-	i64 tmp_len = line->len;
+	i64 tmp_len = line.len;
 	u64 occ_idx = 0;
-    while ((occ_idx = bm_strstr((u8 *)tmp, line->len, p->search_str, p->search_str_len, p->lookup)) != line->len) {
+    while ((occ_idx = bm_strstr((u8 *)tmp, line.len, p->search_str, p->search_str_len, p->lookup)) != line.len) {
 		tmp += occ_idx + p->search_str_len;
 		tmp_len -= occ_idx + p->search_str_len;
 		if (tmp_len <= 0) {
@@ -207,18 +207,17 @@ void check_line(WorkPacket *p, LineRef *line) {
 	}
 
 	if (occurances > 0) {
-		printf("%.*s", (i32)line->len, line->str);
+		printf("%.*s", (i32)line.len, line.str);
 	}
 
 	p->line_no++;
-	free(line);
 }
 
 void process_chunk(WorkPacket *p) {
 	p->line_no = 1;
 
-    LineRef *next_line = get_line(p->chunk, 256);
-	while (next_line != NULL) {
+    LineRef next_line = get_line(p->chunk, 256);
+	while (next_line.str != NULL) {
 		check_line(p, next_line);
     	next_line = get_line(p->chunk, 256);
 	}
